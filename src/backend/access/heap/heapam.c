@@ -1136,6 +1136,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 {
 	HeapScanDesc scan;
 
+	Assert(SnapshotSet());
+
 	/*
 	 * increment relation ref count while scanning relation
 	 *
@@ -1545,7 +1547,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	at_chain_start = first_call;
 	skip = !first_call;
 
-	Assert(TransactionIdIsValid(RecentGlobalXmin));
+	Assert(SnapshotSet());
 	Assert(BufferGetBlockNumber(buffer) == blkno);
 
 	/* Scan through possible multiple members of HOT-chain */
@@ -5633,7 +5635,7 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
 	 * if so (vacuum can't subsequently move relfrozenxid to beyond
 	 * TransactionXmin, so there's no race here).
 	 */
-	Assert(TransactionIdIsValid(TransactionXmin));
+	Assert(SnapshotSet() && TransactionIdIsValid(TransactionXmin));
 	if (TransactionIdPrecedes(TransactionXmin, relation->rd_rel->relfrozenxid))
 		prune_xid = relation->rd_rel->relfrozenxid;
 	else

@@ -116,6 +116,8 @@ extern void PopActiveSnapshot(void);
 extern Snapshot GetActiveSnapshot(void);
 extern bool ActiveSnapshotSet(void);
 
+extern bool SnapshotSet(void);
+
 extern Snapshot RegisterSnapshot(Snapshot snapshot);
 extern void UnregisterSnapshot(Snapshot snapshot);
 extern Snapshot RegisterSnapshotOnOwner(Snapshot snapshot, ResourceOwner owner);

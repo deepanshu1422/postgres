@@ -412,10 +412,10 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	Snapshot	snapshot = SnapshotAny;
 
 	/*
-	 * RecentGlobalXmin assertion matches index_getnext_tid().  See note on
-	 * RecentGlobalXmin/B-Tree page deletion.
+	 * This assertion matches the one in index_getnext_tid().  See page
+	 * recycling/RecentGlobalXmin notes in nbtree README.
 	 */
-	Assert(TransactionIdIsValid(RecentGlobalXmin));
+	Assert(SnapshotSet());
 
 	/*
 	 * Initialize state for entire verification operation

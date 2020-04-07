@@ -858,6 +858,25 @@ ActiveSnapshotSet(void)
 }
 
 /*
+ * Does this transaction have a snapshot.
+ */
+bool
+SnapshotSet(void)
+{
+	/* can't be safe, because somehow xmin is not set */
+	if (!TransactionIdIsValid(MyPgXact->xmin) && HistoricSnapshot == NULL)
+		return false;
+
+	/*
+	 * Can't be safe because no snapshot being active/registered means that
+	 * e.g. invalidation processing could change xmin horizon.
+	 */
+	return ActiveSnapshot != NULL ||
+		!pairingheap_is_empty(&RegisteredSnapshots) ||
+		HistoricSnapshot != NULL;
+}
+
+/*
  * RegisterSnapshot
  *		Register a snapshot as being in use by the current resource owner
  *

@@ -184,6 +184,8 @@ index_insert(Relation indexRelation,
 	RELATION_CHECKS;
 	CHECK_REL_PROCEDURE(aminsert);
 
+	Assert(SnapshotSet());
+
 	if (!(indexRelation->rd_indam->ampredlocks))
 		CheckForSerializableConflictIn(indexRelation,
 									   (ItemPointer) NULL,
@@ -255,6 +257,8 @@ index_beginscan_internal(Relation indexRelation,
 						 ParallelIndexScanDesc pscan, bool temp_snap)
 {
 	IndexScanDesc scan;
+
+	Assert(SnapshotSet());
 
 	RELATION_CHECKS;
 	CHECK_REL_PROCEDURE(ambeginscan);
@@ -519,7 +523,7 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 	SCAN_CHECKS;
 	CHECK_SCAN_PROCEDURE(amgettuple);
 
-	Assert(TransactionIdIsValid(RecentGlobalXmin));
+	Assert(SnapshotSet());
 
 	/*
 	 * The AM's amgettuple proc finds the next index entry matching the scan
@@ -573,6 +577,8 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 {
 	bool		all_dead = false;
 	bool		found;
+
+	Assert(SnapshotSet());
 
 	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
 									scan->xs_snapshot, slot,

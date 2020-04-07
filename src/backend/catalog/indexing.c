@@ -22,6 +22,7 @@
 #include "catalog/indexing.h"
 #include "executor/executor.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 
 /*
@@ -184,6 +185,8 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 {
 	CatalogIndexState indstate;
 
+	Assert(SnapshotSet());
+
 	indstate = CatalogOpenIndexes(heapRel);
 
 	simple_heap_insert(heapRel, tup);
@@ -204,6 +207,8 @@ void
 CatalogTupleInsertWithInfo(Relation heapRel, HeapTuple tup,
 						   CatalogIndexState indstate)
 {
+	Assert(SnapshotSet());
+
 	simple_heap_insert(heapRel, tup);
 
 	CatalogIndexInsert(indstate, tup);
@@ -225,6 +230,8 @@ CatalogTupleUpdate(Relation heapRel, ItemPointer otid, HeapTuple tup)
 {
 	CatalogIndexState indstate;
 
+	Assert(SnapshotSet());
+
 	indstate = CatalogOpenIndexes(heapRel);
 
 	simple_heap_update(heapRel, otid, tup);
@@ -245,6 +252,8 @@ void
 CatalogTupleUpdateWithInfo(Relation heapRel, ItemPointer otid, HeapTuple tup,
 						   CatalogIndexState indstate)
 {
+	Assert(SnapshotSet());
+
 	simple_heap_update(heapRel, otid, tup);
 
 	CatalogIndexInsert(indstate, tup);
@@ -268,5 +277,7 @@ CatalogTupleUpdateWithInfo(Relation heapRel, ItemPointer otid, HeapTuple tup,
 void
 CatalogTupleDelete(Relation heapRel, ItemPointer tid)
 {
+	Assert(SnapshotSet());
+
 	simple_heap_delete(heapRel, tid);
 }
