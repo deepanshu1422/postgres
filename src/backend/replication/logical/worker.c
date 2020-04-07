@@ -1245,6 +1245,9 @@ apply_handle_truncate(StringInfo s)
 
 	ensure_transaction();
 
+	/* catalog modifications need a set snapshot */
+	PushActiveSnapshot(GetTransactionSnapshot());
+
 	remote_relids = logicalrep_read_truncate(s, &cascade, &restart_seqs);
 
 	foreach(lc, remote_relids)
@@ -1332,6 +1335,7 @@ apply_handle_truncate(StringInfo s)
 	}
 
 	CommandCounterIncrement();
+	PopActiveSnapshot();
 }
 
 

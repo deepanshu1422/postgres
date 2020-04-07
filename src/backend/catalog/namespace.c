@@ -55,6 +55,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/varlena.h"
 
@@ -4244,12 +4245,18 @@ RemoveTempRelationsCallback(int code, Datum arg)
 {
 	if (OidIsValid(myTempNamespace))	/* should always be true */
 	{
+		Snapshot snap;
+
 		/* Need to ensure we have a usable transaction. */
 		AbortOutOfAnyTransaction();
 		StartTransactionCommand();
 
+		/* ensure xmin stays set */
+		snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
+
 		RemoveTempRelations(myTempNamespace);
 
+		UnregisterSnapshot(snap);
 		CommitTransactionCommand();
 	}
 }

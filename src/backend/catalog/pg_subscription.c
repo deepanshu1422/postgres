@@ -31,6 +31,7 @@
 #include "utils/fmgroids.h"
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 static List *textarray_to_stringlist(ArrayType *textarray);
@@ -286,6 +287,7 @@ UpdateSubscriptionRelState(Oid subid, Oid relid, char state,
 	bool		nulls[Natts_pg_subscription_rel];
 	Datum		values[Natts_pg_subscription_rel];
 	bool		replaces[Natts_pg_subscription_rel];
+	Snapshot snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 
 	LockSharedObject(SubscriptionRelationId, subid, 0, AccessShareLock);
 
@@ -321,6 +323,8 @@ UpdateSubscriptionRelState(Oid subid, Oid relid, char state,
 
 	/* Cleanup. */
 	table_close(rel, NoLock);
+
+	UnregisterSnapshot(snap);
 }
 
 /*

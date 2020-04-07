@@ -863,6 +863,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 			{
 				Relation	rel;
 				WalRcvExecResult *res;
+				Snapshot	snap;
 
 				SpinLockAcquire(&MyLogicalRepWorker->relmutex);
 				MyLogicalRepWorker->relstate = SUBREL_STATE_DATASYNC;
@@ -871,10 +872,14 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 
 				/* Update the state and make it visible to others. */
 				StartTransactionCommand();
+				snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
+
 				UpdateSubscriptionRelState(MyLogicalRepWorker->subid,
 										   MyLogicalRepWorker->relid,
 										   MyLogicalRepWorker->relstate,
 										   MyLogicalRepWorker->relstate_lsn);
+
+				UnregisterSnapshot(snap);
 				CommitTransactionCommand();
 				pgstat_report_stat(false);
 
@@ -918,6 +923,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 								   CRS_USE_SNAPSHOT, origin_startpos);
 
 				PushActiveSnapshot(GetTransactionSnapshot());
+				snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 				copy_table(rel);
 				PopActiveSnapshot();
 
@@ -932,6 +938,8 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 
 				/* Make the copy visible. */
 				CommandCounterIncrement();
+
+				UnregisterSnapshot(snap);
 
 				/*
 				 * We are done with the initial data synchronization, update
@@ -957,6 +965,8 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 				 */
 				if (*origin_startpos >= MyLogicalRepWorker->relstate_lsn)
 				{
+					snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
+
 					/*
 					 * Update the new state in catalog.  No need to bother
 					 * with the shmem state as we are exiting for good.
@@ -965,6 +975,8 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 											   MyLogicalRepWorker->relid,
 											   SUBREL_STATE_SYNCDONE,
 											   *origin_startpos);
+					UnregisterSnapshot(snap);
+
 					finish_sync_worker();
 				}
 				break;

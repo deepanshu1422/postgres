@@ -15200,6 +15200,7 @@ PreCommit_on_commit_actions(void)
 	ListCell   *l;
 	List	   *oids_to_truncate = NIL;
 	List	   *oids_to_drop = NIL;
+	Snapshot	snap;
 
 	foreach(l, on_commits)
 	{
@@ -15230,6 +15231,11 @@ PreCommit_on_commit_actions(void)
 				break;
 		}
 	}
+
+	if (oids_to_truncate == NIL && oids_to_drop == NIL)
+		return;
+
+	snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 
 	/*
 	 * Truncate relations before dropping so that all dependencies between
@@ -15284,6 +15290,8 @@ PreCommit_on_commit_actions(void)
 		}
 #endif
 	}
+
+	UnregisterSnapshot(snap);
 }
 
 /*

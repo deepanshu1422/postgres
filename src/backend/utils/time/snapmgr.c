@@ -441,6 +441,8 @@ GetOldestSnapshot(void)
 Snapshot
 GetCatalogSnapshot(Oid relid)
 {
+	Assert(IsTransactionState());
+
 	/*
 	 * Return historic snapshot while we're doing logical decoding, so we can
 	 * see the appropriate state of the catalog.
@@ -1017,6 +1019,8 @@ SnapshotResetXmin(void)
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
 		MyPgXact->xmin = InvalidTransactionId;
+		TransactionXmin = InvalidTransactionId;
+		RecentXmin = InvalidTransactionId;
 		return;
 	}
 

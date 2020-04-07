@@ -2837,6 +2837,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	char	   *relationName = NULL;
 	char	   *relationNamespace = NULL;
 	PGRUsage	ru0;
+	Snapshot	snap;
 
 	/*
 	 * Create a memory context that will survive forced transaction commits we
@@ -3306,6 +3307,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	 */
 
 	StartTransactionCommand();
+	snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 
 	forboth(lc, indexIds, lc2, newIndexIds)
 	{
@@ -3354,8 +3356,11 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	}
 
 	/* Commit this transaction and make index swaps visible */
+	UnregisterSnapshot(snap);
 	CommitTransactionCommand();
+
 	StartTransactionCommand();
+	snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 
 	/*
 	 * Phase 5 of REINDEX CONCURRENTLY
@@ -3386,7 +3391,9 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	}
 
 	/* Commit this transaction to make the updates visible. */
+	UnregisterSnapshot(snap);
 	CommitTransactionCommand();
+
 	StartTransactionCommand();
 
 	/*
@@ -3400,6 +3407,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
 
 	PushActiveSnapshot(GetTransactionSnapshot());
+	snap = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
 
 	{
 		ObjectAddresses *objects = new_object_addresses();
@@ -3425,6 +3433,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 	}
 
 	PopActiveSnapshot();
+	UnregisterSnapshot(snap);
 	CommitTransactionCommand();
 
 	/*
