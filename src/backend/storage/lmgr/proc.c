@@ -65,7 +65,6 @@ bool		log_lock_waits = false;
 
 /* Pointer to this process's PGPROC and PGXACT structs, if any */
 PGPROC	   *MyProc = NULL;
-PGXACT	   *MyPgXact = NULL;
 
 /*
  * This spinlock protects the freelist of recycled PGPROC structures.
@@ -109,9 +108,6 @@ ProcGlobalShmemSize(void)
 	size = add_size(size, mul_size(TotalProcs, sizeof(PGPROC)));
 	size = add_size(size, sizeof(slock_t));
 
-	size = add_size(size, mul_size(MaxBackends, sizeof(PGXACT)));
-	size = add_size(size, mul_size(NUM_AUXILIARY_PROCS, sizeof(PGXACT)));
-	size = add_size(size, mul_size(max_prepared_xacts, sizeof(PGXACT)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->xids)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->nsubxids)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->vacuumFlags)));
@@ -161,7 +157,6 @@ void
 InitProcGlobal(void)
 {
 	PGPROC	   *procs;
-	PGXACT	   *pgxacts;
 	int			i,
 				j;
 	bool		found;
@@ -201,18 +196,6 @@ InitProcGlobal(void)
 	ProcGlobal->allProcs = procs;
 	/* XXX allProcCount isn't really all of them; it excludes prepared xacts */
 	ProcGlobal->allProcCount = MaxBackends + NUM_AUXILIARY_PROCS;
-
-	/*
-	 * Also allocate a separate array of PGXACT structures.  This is separate
-	 * from the main PGPROC array so that the most heavily accessed data is
-	 * stored contiguously in memory in as few cache lines as possible. This
-	 * provides significant performance benefits, especially on a
-	 * multiprocessor system.  There is one PGXACT structure for every PGPROC
-	 * structure.
-	 */
-	pgxacts = (PGXACT *) ShmemAlloc(TotalProcs * sizeof(PGXACT));
-	MemSet(pgxacts, 0, TotalProcs * sizeof(PGXACT));
-	ProcGlobal->allPgXact = pgxacts;
 
 	/*
 	 * Also allocate a separate arrays for data that is frequently (e.g. by
@@ -382,7 +365,6 @@ InitProcess(void)
 				(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
 				 errmsg("sorry, too many clients already")));
 	}
-	MyPgXact = &ProcGlobal->allPgXact[MyProc->pgprocno];
 
 	/*
 	 * Cross-check that the PGPROC is of the type we expect; if this were not
@@ -579,7 +561,6 @@ InitAuxiliaryProcess(void)
 	((volatile PGPROC *) auxproc)->pid = MyProcPid;
 
 	MyProc = auxproc;
-	MyPgXact = &ProcGlobal->allPgXact[auxproc->pgprocno];
 
 	SpinLockRelease(ProcStructLock);
 

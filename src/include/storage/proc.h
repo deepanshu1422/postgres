@@ -218,19 +218,6 @@ struct PGPROC
 
 
 extern PGDLLIMPORT PGPROC *MyProc;
-extern PGDLLIMPORT struct PGXACT *MyPgXact;
-
-/*
- * Prior to PostgreSQL 9.2, the fields below were stored as part of the
- * PGPROC.  However, benchmarking revealed that packing these particular
- * members into a separate array as tightly as possible sped up GetSnapshotData
- * considerably on systems with many CPU cores, by reducing the number of
- * cache lines needing to be fetched.  Thus, think very carefully before adding
- * anything else here.
- */
-typedef struct PGXACT
-{
-} PGXACT;
 
 /*
  * There is one ProcGlobal struct for the whole database cluster.
@@ -239,8 +226,6 @@ typedef struct PROC_HDR
 {
 	/* Array of PGPROC structures (not including dummies for prepared txns) */
 	PGPROC	   *allProcs;
-	/* Array of PGXACT structures (not including dummies for prepared txns) */
-	PGXACT	   *allPgXact;
 
 	/*
 	 * Arrays with per-backend information that is hotly accessed, indexed by

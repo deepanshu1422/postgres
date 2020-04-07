@@ -21,9 +21,9 @@
  *		GIDs and aborts the transaction if there already is a global
  *		transaction in prepared state with the same GID.
  *
- *		A global transaction (gxact) also has dummy PGXACT and PGPROC; this is
- *		what keeps the XID considered running by TransactionIdIsInProgress.
- *		It is also convenient as a PGPROC to hook the gxact's locks to.
+ *		A global transaction (gxact) also has dummy PGPROC; this is what keeps
+ *		the XID considered running by TransactionIdIsInProgress.  It is also
+ *		convenient as a PGPROC to hook the gxact's locks to.
  *
  *		Information to recover prepared transactions in case of crash is
  *		now stored in WAL for the common case. In some cases there will be

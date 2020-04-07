@@ -96,7 +96,7 @@ typedef struct ProcArrayStruct
 	/* oldest catalog xmin of any replication slot */
 	TransactionId replication_slot_catalog_xmin;
 
-	/* indexes into allPgXact[], has PROCARRAY_MAXPROCS entries */
+	/* indexes into allProcs[], has PROCARRAY_MAXPROCS entries */
 	int			pgprocnos[FLEXIBLE_ARRAY_MEMBER];
 } ProcArrayStruct;
 
@@ -183,7 +183,6 @@ typedef struct ComputedHorizons
 static ProcArrayStruct *procArray;
 
 static PGPROC *allProcs;
-static PGXACT *allPgXact;
 
 /*
  * Bookkeeping for tracking emulated transactions in recovery
@@ -270,8 +269,7 @@ static int	KnownAssignedXidsGetAndSetXmin(TransactionId *xarray,
 static TransactionId KnownAssignedXidsGetOldestXmin(void);
 static void KnownAssignedXidsDisplay(int trace_level);
 static void KnownAssignedXidsReset(void);
-static inline void ProcArrayEndTransactionInternal(PGPROC *proc,
-												   PGXACT *pgxact, TransactionId latestXid);
+static inline void ProcArrayEndTransactionInternal(PGPROC *proc, TransactionId latestXid);
 static void ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid);
 static void MaintainLatestCompletedXid(TransactionId latestXid);
 
@@ -356,7 +354,6 @@ CreateSharedProcArray(void)
 	}
 
 	allProcs = ProcGlobal->allProcs;
-	allPgXact = ProcGlobal->allPgXact;
 
 	/* Create or attach to the KnownAssignedXids arrays too, if needed */
 	if (EnableHotStandby)
@@ -563,8 +560,6 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
 void
 ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 {
-	PGXACT	   *pgxact = &allPgXact[proc->pgprocno];
-
 	if (TransactionIdIsValid(latestXid))
 	{
 		/*
@@ -582,7 +577,7 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 		 */
 		if (LWLockConditionalAcquire(ProcArrayLock, LW_EXCLUSIVE))
 		{
-			ProcArrayEndTransactionInternal(proc, pgxact, latestXid);
+			ProcArrayEndTransactionInternal(proc, latestXid);
 			LWLockRelease(ProcArrayLock);
 		}
 		else
@@ -622,8 +617,7 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
  * We don't do any locking here; caller must handle that.
  */
 static inline void
-ProcArrayEndTransactionInternal(PGPROC *proc, PGXACT *pgxact,
-								TransactionId latestXid)
+ProcArrayEndTransactionInternal(PGPROC *proc, TransactionId latestXid)
 {
 	size_t		pgxactoff = proc->pgxactoff;
 
@@ -741,9 +735,8 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
 	while (nextidx != INVALID_PGPROCNO)
 	{
 		PGPROC	   *proc = &allProcs[nextidx];
-		PGXACT	   *pgxact = &allPgXact[nextidx];
 
-		ProcArrayEndTransactionInternal(proc, pgxact, proc->procArrayGroupMemberXid);
+		ProcArrayEndTransactionInternal(proc, proc->procArrayGroupMemberXid);
 
 		/* Move to next proc in list. */
 		nextidx = pg_atomic_read_u32(&proc->procArrayGroupNext);
