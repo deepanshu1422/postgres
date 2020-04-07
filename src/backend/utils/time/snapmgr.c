@@ -862,7 +862,7 @@ bool
 SnapshotSet(void)
 {
 	/* can't be safe, because somehow xmin is not set */
-	if (!TransactionIdIsValid(MyPgXact->xmin) && HistoricSnapshot == NULL)
+	if (!TransactionIdIsValid(MyProc->xmin) && HistoricSnapshot == NULL)
 		return false;
 
 	/*
@@ -1005,7 +1005,7 @@ SnapshotResetXmin(void)
 
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
-		MyPgXact->xmin = InvalidTransactionId;
+		MyProc->xmin = InvalidTransactionId;
 		TransactionXmin = InvalidTransactionId;
 		RecentXmin = InvalidTransactionId;
 		return;
@@ -1014,8 +1014,8 @@ SnapshotResetXmin(void)
 	minSnapshot = pairingheap_container(SnapshotData, ph_node,
 										pairingheap_first(&RegisteredSnapshots));
 
-	if (TransactionIdPrecedes(MyPgXact->xmin, minSnapshot->xmin))
-		MyPgXact->xmin = minSnapshot->xmin;
+	if (TransactionIdPrecedes(MyProc->xmin, minSnapshot->xmin))
+		MyProc->xmin = minSnapshot->xmin;
 }
 
 /*
@@ -1168,7 +1168,7 @@ AtEOXact_Snapshot(bool isCommit, bool resetXmin)
 	if (resetXmin)
 		SnapshotResetXmin();
 
-	Assert(resetXmin || MyPgXact->xmin == 0);
+	Assert(resetXmin || MyProc->xmin == 0);
 }
 
 
@@ -1850,7 +1850,7 @@ TransactionIdLimitedForOldSnapshots(TransactionId recentXmin,
 	 */
 	if (old_snapshot_threshold == 0)
 	{
-		if (TransactionIdPrecedes(latest_xmin, MyPgXact->xmin)
+		if (TransactionIdPrecedes(latest_xmin, MyProc->xmin)
 			&& TransactionIdFollows(latest_xmin, xlimit))
 			xlimit = latest_xmin;
 

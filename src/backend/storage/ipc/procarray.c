@@ -531,9 +531,9 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 		Assert(!TransactionIdIsValid(allPgXact[proc->pgprocno].xid));
 
 		proc->lxid = InvalidLocalTransactionId;
-		pgxact->xmin = InvalidTransactionId;
 		/* must be cleared with xid/xmin: */
 		pgxact->vacuumFlags &= ~PROC_VACUUM_STATE_MASK;
+		proc->xmin = InvalidTransactionId;
 		proc->delayChkpt = false; /* be sure this is cleared in abort */
 		proc->recoveryConflictPending = false;
 
@@ -553,9 +553,9 @@ ProcArrayEndTransactionInternal(PGPROC *proc, PGXACT *pgxact,
 {
 	pgxact->xid = InvalidTransactionId;
 	proc->lxid = InvalidLocalTransactionId;
-	pgxact->xmin = InvalidTransactionId;
 	/* must be cleared with xid/xmin: */
 	pgxact->vacuumFlags &= ~PROC_VACUUM_STATE_MASK;
+	proc->xmin = InvalidTransactionId;
 	proc->delayChkpt = false; /* be sure this is cleared in abort */
 	proc->recoveryConflictPending = false;
 
@@ -707,7 +707,7 @@ ProcArrayClearTransaction(PGPROC *proc)
 	 */
 	pgxact->xid = InvalidTransactionId;
 	proc->lxid = InvalidLocalTransactionId;
-	pgxact->xmin = InvalidTransactionId;
+	proc->xmin = InvalidTransactionId;
 	proc->recoveryConflictPending = false;
 
 	/* redundant, but just in case */
@@ -1456,7 +1456,7 @@ ComputeTransactionHorizons(ComputedHorizons *h)
 
 		/* Fetch xid just once - see GetNewTransactionId */
 		xid = UINT32_ACCESS_ONCE(pgxact->xid);
-		xmin = UINT32_ACCESS_ONCE(pgxact->xmin);
+		xmin = UINT32_ACCESS_ONCE(proc->xmin);
 
 		/*
 		 * Consider both the transaction's Xmin, and its Xid.
@@ -1771,7 +1771,7 @@ GetSnapshotData(Snapshot snapshot)
 
 	/*
 	 * It is sufficient to get shared lock on ProcArrayLock, even if we are
-	 * going to set MyPgXact->xmin.
+	 * going to set MyProc->xmin.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
@@ -1923,8 +1923,8 @@ GetSnapshotData(Snapshot snapshot)
 	replication_slot_xmin = procArray->replication_slot_xmin;
 	replication_slot_catalog_xmin = procArray->replication_slot_catalog_xmin;
 
-	if (!TransactionIdIsValid(MyPgXact->xmin))
-		MyPgXact->xmin = TransactionXmin = xmin;
+	if (!TransactionIdIsValid(MyProc->xmin))
+		MyProc->xmin = TransactionXmin = xmin;
 
 	LWLockRelease(ProcArrayLock);
 
@@ -2097,7 +2097,7 @@ ProcArrayInstallImportedXmin(TransactionId xmin,
 		/*
 		 * Likewise, let's just make real sure its xmin does cover us.
 		 */
-		xid = UINT32_ACCESS_ONCE(pgxact->xmin);
+		xid = UINT32_ACCESS_ONCE(proc->xmin);
 		if (!TransactionIdIsNormal(xid) ||
 			!TransactionIdPrecedesOrEquals(xid, xmin))
 			continue;
@@ -2108,7 +2108,7 @@ ProcArrayInstallImportedXmin(TransactionId xmin,
 		 * GetSnapshotData first, we'll be overwriting a valid xmin here, so
 		 * we don't check that.)
 		 */
-		MyPgXact->xmin = TransactionXmin = xmin;
+		MyProc->xmin = TransactionXmin = xmin;
 
 		result = true;
 		break;
@@ -2133,7 +2133,6 @@ ProcArrayInstallRestoredXmin(TransactionId xmin, PGPROC *proc)
 {
 	bool		result = false;
 	TransactionId xid;
-	PGXACT	   *pgxact;
 
 	Assert(TransactionIdIsNormal(xmin));
 	Assert(proc != NULL);
@@ -2141,20 +2140,18 @@ ProcArrayInstallRestoredXmin(TransactionId xmin, PGPROC *proc)
 	/* Get lock so source xact can't end while we're doing this */
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
-	pgxact = &allPgXact[proc->pgprocno];
-
 	/*
 	 * Be certain that the referenced PGPROC has an advertised xmin which is
 	 * no later than the one we're installing, so that the system-wide xmin
 	 * can't go backwards.  Also, make sure it's running in the same database,
 	 * so that the per-database xmin cannot go backwards.
 	 */
-	xid = UINT32_ACCESS_ONCE(pgxact->xmin);
+	xid = UINT32_ACCESS_ONCE(proc->xmin);
 	if (proc->databaseId == MyDatabaseId &&
 		TransactionIdIsNormal(xid) &&
 		TransactionIdPrecedesOrEquals(xid, xmin))
 	{
-		MyPgXact->xmin = TransactionXmin = xmin;
+		MyProc->xmin = TransactionXmin = xmin;
 		result = true;
 	}
 
@@ -2779,7 +2776,7 @@ GetCurrentVirtualXIDs(TransactionId limitXmin, bool excludeXmin0,
 		if (allDbs || proc->databaseId == MyDatabaseId)
 		{
 			/* Fetch xmin just once - might change on us */
-			TransactionId pxmin = UINT32_ACCESS_ONCE(pgxact->xmin);
+			TransactionId pxmin = UINT32_ACCESS_ONCE(proc->xmin);
 
 			if (excludeXmin0 && !TransactionIdIsValid(pxmin))
 				continue;
@@ -2865,7 +2862,6 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 	{
 		int			pgprocno = arrayP->pgprocnos[index];
 		PGPROC	   *proc = &allProcs[pgprocno];
-		PGXACT	   *pgxact = &allPgXact[pgprocno];
 
 		/* Exclude prepared transactions */
 		if (proc->pid == 0)
@@ -2875,7 +2871,7 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 			proc->databaseId == dbOid)
 		{
 			/* Fetch xmin just once - can't change on us, but good coding */
-			TransactionId pxmin = UINT32_ACCESS_ONCE(pgxact->xmin);
+			TransactionId pxmin = UINT32_ACCESS_ONCE(proc->xmin);
 
 			/*
 			 * We ignore an invalid pxmin because this means that backend has
