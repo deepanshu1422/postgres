@@ -211,6 +211,8 @@ typedef struct VariableCacheData
 	FullTransactionId latestCompletedFullXid;	/* newest full XID that has
 												 * committed or aborted */
 
+	uint64 csn;
+
 	/*
 	 * These fields are protected by CLogTruncationLock
 	 */

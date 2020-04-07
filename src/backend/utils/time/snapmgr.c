@@ -604,6 +604,8 @@ SetTransactionSnapshot(Snapshot sourcesnap, VirtualTransactionId *sourcevxid,
 	CurrentSnapshot->takenDuringRecovery = sourcesnap->takenDuringRecovery;
 	/* NB: curcid should NOT be copied, it's a local matter */
 
+	CurrentSnapshot->csn = 0;
+
 	/*
 	 * Now we have to fix what GetSnapshotData did with MyPgXact->xmin and
 	 * TransactionXmin.  There is a race condition: to make sure we are not
@@ -679,6 +681,7 @@ CopySnapshot(Snapshot snapshot)
 	newsnap->regd_count = 0;
 	newsnap->active_count = 0;
 	newsnap->copied = true;
+	newsnap->csn = 0;
 
 	/* setup XID array */
 	if (snapshot->xcnt > 0)
@@ -2227,6 +2230,7 @@ RestoreSnapshot(char *start_address)
 	snapshot->curcid = serialized_snapshot.curcid;
 	snapshot->whenTaken = serialized_snapshot.whenTaken;
 	snapshot->lsn = serialized_snapshot.lsn;
+	snapshot->csn = 0;
 
 	/* Copy XIDs, if present. */
 	if (serialized_snapshot.xcnt > 0)

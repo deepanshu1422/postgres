@@ -66,6 +66,7 @@
 #include "utils/snapmgr.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
+#define UINT64_ACCESS_ONCE(var)		 ((uint64)(*((volatile uint64 *)&(var))))
 
 /* Our shared memory area */
 typedef struct ProcArrayStruct
@@ -351,6 +352,7 @@ CreateSharedProcArray(void)
 		procArray->lastOverflowedXid = InvalidTransactionId;
 		procArray->replication_slot_xmin = InvalidTransactionId;
 		procArray->replication_slot_catalog_xmin = InvalidTransactionId;
+		ShmemVariableCache->csn = 1;
 	}
 
 	allProcs = ProcGlobal->allProcs;
@@ -491,6 +493,9 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
 		/* Advance global latestCompletedXid while holding the lock */
 		MaintainLatestCompletedXid(latestXid);
 
+		/* Same with CSN */
+		ShmemVariableCache->csn++;
+
 		ProcGlobal->xids[proc->pgxactoff] = 0;
 		ProcGlobal->nsubxids[proc->pgxactoff] = 0;
 	}
@@ -621,6 +626,7 @@ ProcArrayEndTransactionInternal(PGPROC *proc, TransactionId latestXid)
 {
 	size_t		pgxactoff = proc->pgxactoff;
 
+	Assert(LWLockHeldByMe(ProcArrayLock));
 	Assert(TransactionIdIsValid(ProcGlobal->xids[pgxactoff]));
 	Assert(ProcGlobal->xids[pgxactoff] == proc->xidCopy);
 
@@ -649,6 +655,9 @@ ProcArrayEndTransactionInternal(PGPROC *proc, TransactionId latestXid)
 
 	/* Also advance global latestCompletedXid while holding the lock */
 	MaintainLatestCompletedXid(latestXid);
+
+	/* Same with CSN */
+	ShmemVariableCache->csn++;
 }
 
 /*
@@ -1782,6 +1791,61 @@ GetMaxSnapshotSubxidCount(void)
 	return TOTAL_MAX_CACHED_SUBXIDS;
 }
 
+static void
+GetSnapshotDataFillTooOld(Snapshot snapshot)
+{
+	if (old_snapshot_threshold < 0)
+	{
+		/*
+		 * If not using "snapshot too old" feature, fill related fields with
+		 * dummy values that don't require any locking.
+		 */
+		snapshot->lsn = InvalidXLogRecPtr;
+		snapshot->whenTaken = 0;
+	}
+	else
+	{
+		/*
+		 * Capture the current time and WAL stream location in case this
+		 * snapshot becomes old enough to need to fall back on the special
+		 * "old snapshot" logic.
+		 */
+		snapshot->lsn = GetXLogInsertRecPtr();
+		snapshot->whenTaken = GetSnapshotCurrentTimestamp();
+		MaintainOldSnapshotTimeMapping(snapshot->whenTaken, snapshot->xmin);
+	}
+}
+
+/*
+ * Helper function for GetSnapshotData() that check if the bulk of the
+ * visibility information in the snapshot is still valid. If so, it updates
+ * the fields that need to change and returns true. false is returned
+ * otherwise.
+ */
+static bool
+GetSnapshotDataReuse(Snapshot snapshot)
+{
+	if (snapshot->csn != 0 && MyProc->xidCopy == InvalidTransactionId &&
+		UINT64_ACCESS_ONCE(ShmemVariableCache->csn) == snapshot->csn)
+	{
+		if (!TransactionIdIsValid(MyProc->xmin))
+			MyProc->xmin = TransactionXmin = snapshot->xmin;
+		RecentXmin = snapshot->xmin;
+		Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));
+
+		snapshot->curcid = GetCurrentCommandId(false);
+		snapshot->active_count = 0;
+		snapshot->regd_count = 0;
+		snapshot->copied = false;
+
+		GetSnapshotDataFillTooOld(snapshot);
+
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * GetSnapshotData -- returns information about running transactions.
  *
@@ -1829,7 +1893,7 @@ GetSnapshotData(Snapshot snapshot)
 	TransactionId oldestxid;
 	int			mypgxactoff;
 	TransactionId myxid;
-
+	uint64		csn;
 	TransactionId replication_slot_xmin = InvalidTransactionId;
 	TransactionId replication_slot_catalog_xmin = InvalidTransactionId;
 
@@ -1867,6 +1931,9 @@ GetSnapshotData(Snapshot snapshot)
 					 errmsg("out of memory")));
 	}
 
+	if (GetSnapshotDataReuse(snapshot))
+		return snapshot;
+
 	/*
 	 * It is sufficient to get shared lock on ProcArrayLock, even if we are
 	 * going to set MyProc->xmin.
@@ -1879,6 +1946,7 @@ GetSnapshotData(Snapshot snapshot)
 	Assert(myxid == MyProc->xidCopy);
 
 	oldestxid = ShmemVariableCache->oldestXid;
+	csn = ShmemVariableCache->csn;
 
 	/* xmax is always latestCompletedXid + 1 */
 	xmax = XidFromFullTransactionId(latest_completed);
@@ -2141,7 +2209,7 @@ GetSnapshotData(Snapshot snapshot)
 	snapshot->xcnt = count;
 	snapshot->subxcnt = subcount;
 	snapshot->suboverflowed = suboverflowed;
-
+	snapshot->csn = csn;
 	snapshot->curcid = GetCurrentCommandId(false);
 
 	/*
@@ -2152,26 +2220,7 @@ GetSnapshotData(Snapshot snapshot)
 	snapshot->regd_count = 0;
 	snapshot->copied = false;
 
-	if (old_snapshot_threshold < 0)
-	{
-		/*
-		 * If not using "snapshot too old" feature, fill related fields with
-		 * dummy values that don't require any locking.
-		 */
-		snapshot->lsn = InvalidXLogRecPtr;
-		snapshot->whenTaken = 0;
-	}
-	else
-	{
-		/*
-		 * Capture the current time and WAL stream location in case this
-		 * snapshot becomes old enough to need to fall back on the special
-		 * "old snapshot" logic.
-		 */
-		snapshot->lsn = GetXLogInsertRecPtr();
-		snapshot->whenTaken = GetSnapshotCurrentTimestamp();
-		MaintainOldSnapshotTimeMapping(snapshot->whenTaken, xmin);
-	}
+	GetSnapshotDataFillTooOld(snapshot);
 
 	return snapshot;
 }
