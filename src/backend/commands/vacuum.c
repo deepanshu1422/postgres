@@ -1730,9 +1730,10 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params)
 		 * which is probably Not Good.
 		 */
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-		MyPgXact->vacuumFlags |= PROC_IN_VACUUM;
+		MyProc->vacuumFlagsCopy |= PROC_IN_VACUUM;
 		if (params->is_wraparound)
-			MyPgXact->vacuumFlags |= PROC_VACUUM_FOR_WRAPAROUND;
+			MyProc->vacuumFlagsCopy |= PROC_VACUUM_FOR_WRAPAROUND;
+		ProcGlobal->vacuumFlags[MyProc->pgxactoff] = MyProc->vacuumFlagsCopy;
 		LWLockRelease(ProcArrayLock);
 	}
 

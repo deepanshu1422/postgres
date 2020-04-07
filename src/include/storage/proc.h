@@ -41,7 +41,7 @@ struct XidCache
 };
 
 /*
- * Flags for PGXACT->vacuumFlags
+ * Flags for ProcGlobal->vacuumFlags[]
  */
 #define		PROC_IS_AUTOVACUUM	0x01	/* is it an autovac worker? */
 #define		PROC_IN_VACUUM		0x02	/* currently running lazy vacuum */
@@ -105,6 +105,7 @@ struct PGPROC
 	 * accessed without holding ProcArrayLock.
 	 */
 	TransactionId xidCopy;
+	uint8		vacuumFlagsCopy;
 
 	LocalTransactionId lxid;	/* local id of top-level transaction currently
 								 * being executed by this proc, if running;
@@ -228,7 +229,6 @@ extern PGDLLIMPORT struct PGXACT *MyPgXact;
  */
 typedef struct PGXACT
 {
-	uint8		vacuumFlags;	/* vacuum-related flags, see above */
 	bool		overflowed;
 
 	uint8		nxids;
@@ -265,6 +265,11 @@ typedef struct PROC_HDR
 	 * Each PGPROC has a copy of its value in PGPROC.xidCopy.
 	 */
 	TransactionId *xids;
+
+	/*
+	 * Vacuum flags. See PROC_* above.
+	 */
+	uint8	   *vacuumFlags;
 
 	/* Length of allProcs array */
 	uint32		allProcCount;

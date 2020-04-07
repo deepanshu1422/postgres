@@ -250,7 +250,8 @@ analyze_rel(Oid relid, RangeVar *relation,
 	 * OK, let's do it.  First let other backends know I'm in ANALYZE.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyPgXact->vacuumFlags |= PROC_IN_ANALYZE;
+	MyProc->vacuumFlagsCopy |= PROC_IN_ANALYZE;
+	ProcGlobal->vacuumFlags[MyProc->pgxactoff] = MyProc->vacuumFlagsCopy;
 	LWLockRelease(ProcArrayLock);
 	pgstat_progress_start_command(PROGRESS_COMMAND_ANALYZE,
 								  RelationGetRelid(onerel));
@@ -285,7 +286,8 @@ analyze_rel(Oid relid, RangeVar *relation,
 	 * because the vacuum flag is cleared by the end-of-xact code.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyPgXact->vacuumFlags &= ~PROC_IN_ANALYZE;
+	MyProc->vacuumFlagsCopy &= ~PROC_IN_ANALYZE;
+	ProcGlobal->vacuumFlags[MyProc->pgxactoff] = MyProc->vacuumFlagsCopy;
 	LWLockRelease(ProcArrayLock);
 }
 

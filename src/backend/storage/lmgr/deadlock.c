@@ -544,7 +544,6 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 {
 	PGPROC	   *proc;
 	LOCK	   *lock = checkProc->waitLock;
-	PGXACT	   *pgxact;
 	PROCLOCK   *proclock;
 	SHM_QUEUE  *procLocks;
 	LockMethod	lockMethodTable;
@@ -582,7 +581,6 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 		PGPROC	   *leader;
 
 		proc = proclock->tag.myProc;
-		pgxact = &ProcGlobal->allPgXact[proc->pgprocno];
 		leader = proc->lockGroupLeader == NULL ? proc : proc->lockGroupLeader;
 
 		/* A proc never blocks itself or any other lock group member */
@@ -628,9 +626,11 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 					 * problems (which needs to read a different vacuumFlag
 					 * bit), but we don't do that here to avoid grabbing
 					 * ProcArrayLock.
+					 *
+					 * XXX: That's why this is using vacuumFlagsCopy.
 					 */
 					if (checkProc == MyProc &&
-						pgxact->vacuumFlags & PROC_IS_AUTOVACUUM)
+						proc->vacuumFlagsCopy & PROC_IS_AUTOVACUUM)
 						blocking_autovacuum_proc = proc;
 
 					/* We're done looking at this proclock */

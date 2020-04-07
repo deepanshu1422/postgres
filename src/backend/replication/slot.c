@@ -468,7 +468,8 @@ ReplicationSlotRelease(void)
 
 	/* might not have been set when we've been a plain slot */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyPgXact->vacuumFlags &= ~PROC_IN_LOGICAL_DECODING;
+	MyProc->vacuumFlagsCopy &= ~PROC_IN_LOGICAL_DECODING;
+	ProcGlobal->vacuumFlags[MyProc->pgxactoff] = MyProc->vacuumFlagsCopy;
 	LWLockRelease(ProcArrayLock);
 }
 

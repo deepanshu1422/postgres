@@ -113,6 +113,7 @@ ProcGlobalShmemSize(void)
 	size = add_size(size, mul_size(NUM_AUXILIARY_PROCS, sizeof(PGXACT)));
 	size = add_size(size, mul_size(max_prepared_xacts, sizeof(PGXACT)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->xids)));
+	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->vacuumFlags)));
 
 	return size;
 }
@@ -230,6 +231,8 @@ InitProcGlobal(void)
 	// XXX: Pad to cacheline (or even page?)!
 	ProcGlobal->xids = (TransactionId *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->xids));
 	MemSet(ProcGlobal->xids, 0, TotalProcs * sizeof(*ProcGlobal->xids));
+	ProcGlobal->vacuumFlags = (uint8 *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->vacuumFlags));
+	MemSet(ProcGlobal->vacuumFlags, 0, TotalProcs * sizeof(*ProcGlobal->vacuumFlags));
 
 	for (i = 0; i < TotalProcs; i++)
 	{
@@ -412,10 +415,10 @@ InitProcess(void)
 	MyProc->tempNamespaceId = InvalidOid;
 	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyProc->delayChkpt = false;
-	MyPgXact->vacuumFlags = 0;
+	MyProc->vacuumFlagsCopy = 0;
 	/* NB -- autovac launcher intentionally does not set IS_AUTOVACUUM */
 	if (IsAutoVacuumWorkerProcess())
-		MyPgXact->vacuumFlags |= PROC_IS_AUTOVACUUM;
+		MyProc->vacuumFlagsCopy |= PROC_IS_AUTOVACUUM;
 	MyProc->lwWaiting = false;
 	MyProc->lwWaitMode = 0;
 	MyProc->waitLock = NULL;
@@ -594,7 +597,7 @@ InitAuxiliaryProcess(void)
 	MyProc->tempNamespaceId = InvalidOid;
 	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyProc->delayChkpt = false;
-	MyPgXact->vacuumFlags = 0;
+	MyProc->vacuumFlagsCopy = 0;
 	MyProc->lwWaiting = false;
 	MyProc->lwWaitMode = 0;
 	MyProc->waitLock = NULL;
@@ -1330,7 +1333,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 		if (deadlock_state == DS_BLOCKED_BY_AUTOVACUUM && allow_autovacuum_cancel)
 		{
 			PGPROC	   *autovac = GetBlockingAutoVacuumPgproc();
-			PGXACT	   *autovac_pgxact = &ProcGlobal->allPgXact[autovac->pgprocno];
+			uint8		vacuumFlags;
 
 			LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 
@@ -1338,8 +1341,9 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			 * Only do it if the worker is not working to protect against Xid
 			 * wraparound.
 			 */
-			if ((autovac_pgxact->vacuumFlags & PROC_IS_AUTOVACUUM) &&
-				!(autovac_pgxact->vacuumFlags & PROC_VACUUM_FOR_WRAPAROUND))
+			vacuumFlags = ProcGlobal->vacuumFlags[proc->pgxactoff];
+			if ((vacuumFlags & PROC_IS_AUTOVACUUM) &&
+				!(vacuumFlags & PROC_VACUUM_FOR_WRAPAROUND))
 			{
 				int			pid = autovac->pid;
 				StringInfoData locktagbuf;
