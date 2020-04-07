@@ -224,19 +224,26 @@ GetNewTransactionId(bool isSubXact)
 		/* LWLockRelease acts as barrier */
 		ProcGlobal->xids[MyProc->pgxactoff] = xid;
 		MyProc->xidCopy = xid;
+
+		Assert(ProcGlobal->nsubxids[MyProc->pgxactoff] == 0);
 	}
 	else
 	{
-		int			nxids = MyPgXact->nxids;
+		int8	   *pnxids = &ProcGlobal->nsubxids[MyProc->pgxactoff];
+		int8	    nxids = *pnxids;
 
-		if (nxids < PGPROC_MAX_CACHED_SUBXIDS)
+		if (nxids != -1 && nxids < PGPROC_MAX_CACHED_SUBXIDS)
 		{
-			MyProc->subxids.xids[nxids] = xid;
+			MyProc->subxids.xids[*pnxids] = xid;
 			pg_write_barrier();
-			MyPgXact->nxids = nxids + 1;
+			*pnxids = nxids + 1;
 		}
 		else
-			MyPgXact->overflowed = true;
+		{
+			/* mark as overflowed */
+			*pnxids = -1;
+		}
+		MyProc->nsubxidsCopy = *pnxids;
 	}
 
 	LWLockRelease(XidGenLock);

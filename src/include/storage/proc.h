@@ -105,6 +105,7 @@ struct PGPROC
 	 * accessed without holding ProcArrayLock.
 	 */
 	TransactionId xidCopy;
+	int8		nsubxidsCopy;
 	uint8		vacuumFlagsCopy;
 
 	LocalTransactionId lxid;	/* local id of top-level transaction currently
@@ -229,9 +230,6 @@ extern PGDLLIMPORT struct PGXACT *MyPgXact;
  */
 typedef struct PGXACT
 {
-	bool		overflowed;
-
-	uint8		nxids;
 } PGXACT;
 
 /*
@@ -265,6 +263,14 @@ typedef struct PROC_HDR
 	 * Each PGPROC has a copy of its value in PGPROC.xidCopy.
 	 */
 	TransactionId *xids;
+
+	/*
+	 * Number of subtransactions in proc, for PGPROC.subxids. If subxids
+	 * overflows, -1 is stored.
+	 *
+	 * Each PGPROC has a copy of its value in PGPROC.nsubxidsCopy.
+	 */
+	int8	   *nsubxids;
 
 	/*
 	 * Vacuum flags. See PROC_* above.

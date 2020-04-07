@@ -447,14 +447,12 @@ MarkAsPreparingGuts(GlobalTransaction gxact, TransactionId xid, const char *gid,
 					TimestampTz prepared_at, Oid owner, Oid databaseid)
 {
 	PGPROC	   *proc;
-	PGXACT	   *pgxact;
 	int			i;
 
 	Assert(LWLockHeldByMeInMode(TwoPhaseStateLock, LW_EXCLUSIVE));
 
 	Assert(gxact != NULL);
 	proc = &ProcGlobal->allProcs[gxact->pgprocno];
-	pgxact = &ProcGlobal->allPgXact[gxact->pgprocno];
 
 	/* Initialize the PGPROC entry */
 	MemSet(proc, 0, sizeof(PGPROC));
@@ -480,8 +478,7 @@ MarkAsPreparingGuts(GlobalTransaction gxact, TransactionId xid, const char *gid,
 	for (i = 0; i < NUM_LOCK_PARTITIONS; i++)
 		SHMQueueInit(&(proc->myProcLocks[i]));
 	/* subxid data must be filled later by GXactLoadSubxactData */
-	pgxact->overflowed = false;
-	pgxact->nxids = 0;
+	proc->nsubxidsCopy = 0;
 
 	gxact->prepared_at = prepared_at;
 	gxact->xid = xid;
@@ -510,20 +507,18 @@ GXactLoadSubxactData(GlobalTransaction gxact, int nsubxacts,
 					 TransactionId *children)
 {
 	PGPROC	   *proc = &ProcGlobal->allProcs[gxact->pgprocno];
-	PGXACT	   *pgxact = &ProcGlobal->allPgXact[gxact->pgprocno];
 
 	/* We need no extra lock since the GXACT isn't valid yet */
 	if (nsubxacts > PGPROC_MAX_CACHED_SUBXIDS)
 	{
-		pgxact->overflowed = true;
-		nsubxacts = PGPROC_MAX_CACHED_SUBXIDS;
+		nsubxacts = -1;
 	}
 	if (nsubxacts > 0)
 	{
 		memcpy(proc->subxids.xids, children,
 			   nsubxacts * sizeof(TransactionId));
-		pgxact->nxids = nsubxacts;
 	}
+	proc->nsubxidsCopy = nsubxacts;
 }
 
 /*

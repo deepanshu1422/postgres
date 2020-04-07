@@ -113,6 +113,7 @@ ProcGlobalShmemSize(void)
 	size = add_size(size, mul_size(NUM_AUXILIARY_PROCS, sizeof(PGXACT)));
 	size = add_size(size, mul_size(max_prepared_xacts, sizeof(PGXACT)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->xids)));
+	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->nsubxids)));
 	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->vacuumFlags)));
 
 	return size;
@@ -231,6 +232,8 @@ InitProcGlobal(void)
 	// XXX: Pad to cacheline (or even page?)!
 	ProcGlobal->xids = (TransactionId *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->xids));
 	MemSet(ProcGlobal->xids, 0, TotalProcs * sizeof(*ProcGlobal->xids));
+	ProcGlobal->nsubxids = (int8 *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->nsubxids));
+	MemSet(ProcGlobal->nsubxids, 0, TotalProcs * sizeof(*ProcGlobal->nsubxids));
 	ProcGlobal->vacuumFlags = (uint8 *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->vacuumFlags));
 	MemSet(ProcGlobal->vacuumFlags, 0, TotalProcs * sizeof(*ProcGlobal->vacuumFlags));
 
