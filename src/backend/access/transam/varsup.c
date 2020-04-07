@@ -65,7 +65,8 @@ GetNewTransactionId(bool isSubXact)
 	if (IsBootstrapProcessingMode())
 	{
 		Assert(!isSubXact);
-		MyPgXact->xid = BootstrapTransactionId;
+		ProcGlobal->xids[MyProc->pgxactoff] = BootstrapTransactionId;
+		MyProc->xidCopy = BootstrapTransactionId;
 		return FullTransactionIdFromEpochAndXid(0, BootstrapTransactionId);
 	}
 
@@ -219,7 +220,11 @@ GetNewTransactionId(bool isSubXact)
 	 * answer later on when someone does have a reason to inquire.)
 	 */
 	if (!isSubXact)
-		MyPgXact->xid = xid;	/* LWLockRelease acts as barrier */
+	{
+		/* LWLockRelease acts as barrier */
+		ProcGlobal->xids[MyProc->pgxactoff] = xid;
+		MyProc->xidCopy = xid;
+	}
 	else
 	{
 		int			nxids = MyPgXact->nxids;

@@ -102,21 +102,17 @@ Size
 ProcGlobalShmemSize(void)
 {
 	Size		size = 0;
+	uint32		TotalProcs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
 
 	/* ProcGlobal */
 	size = add_size(size, sizeof(PROC_HDR));
-	/* MyProcs, including autovacuum workers and launcher */
-	size = add_size(size, mul_size(MaxBackends, sizeof(PGPROC)));
-	/* AuxiliaryProcs */
-	size = add_size(size, mul_size(NUM_AUXILIARY_PROCS, sizeof(PGPROC)));
-	/* Prepared xacts */
-	size = add_size(size, mul_size(max_prepared_xacts, sizeof(PGPROC)));
-	/* ProcStructLock */
+	size = add_size(size, mul_size(TotalProcs, sizeof(PGPROC)));
 	size = add_size(size, sizeof(slock_t));
 
 	size = add_size(size, mul_size(MaxBackends, sizeof(PGXACT)));
 	size = add_size(size, mul_size(NUM_AUXILIARY_PROCS, sizeof(PGXACT)));
 	size = add_size(size, mul_size(max_prepared_xacts, sizeof(PGXACT)));
+	size = add_size(size, mul_size(TotalProcs, sizeof(*ProcGlobal->xids)));
 
 	return size;
 }
@@ -215,6 +211,25 @@ InitProcGlobal(void)
 	pgxacts = (PGXACT *) ShmemAlloc(TotalProcs * sizeof(PGXACT));
 	MemSet(pgxacts, 0, TotalProcs * sizeof(PGXACT));
 	ProcGlobal->allPgXact = pgxacts;
+
+	/*
+	 * Also allocate a separate arrays for data that is frequently (e.g. by
+	 * GetSnapshotData()) accessed from outside a backend.  There is one entry
+	 * in each for every *live* PGPROC entry, and they are densely packed so
+	 * that the first procArray->numProc entries are all valid.  The entries
+	 * for a PGPROC in those arrays are at PGPROC->pgxactoff.
+	 *
+	 * Note that they may not be accessed without ProcArrayLock held! Upon
+	 * ProcArrayRemove() later entries will be moved.
+	 *
+	 * These are separate from the main PGPROC array so that the most heavily
+	 * accessed data is stored contiguously in memory in as few cache lines as
+	 * possible. This provides significant performance benefits, especially on
+	 * a multiprocessor system.
+	 */
+	// XXX: Pad to cacheline (or even page?)!
+	ProcGlobal->xids = (TransactionId *) ShmemAlloc(TotalProcs * sizeof(*ProcGlobal->xids));
+	MemSet(ProcGlobal->xids, 0, TotalProcs * sizeof(*ProcGlobal->xids));
 
 	for (i = 0; i < TotalProcs; i++)
 	{
@@ -387,7 +402,7 @@ InitProcess(void)
 	MyProc->lxid = InvalidLocalTransactionId;
 	MyProc->fpVXIDLock = false;
 	MyProc->fpLocalTransactionId = InvalidLocalTransactionId;
-	MyPgXact->xid = InvalidTransactionId;
+	MyProc->xidCopy = InvalidTransactionId;
 	MyProc->xmin = InvalidTransactionId;
 	MyProc->pid = MyProcPid;
 	/* backendId, databaseId and roleId will be filled in later */
@@ -571,7 +586,7 @@ InitAuxiliaryProcess(void)
 	MyProc->lxid = InvalidLocalTransactionId;
 	MyProc->fpVXIDLock = false;
 	MyProc->fpLocalTransactionId = InvalidLocalTransactionId;
-	MyPgXact->xid = InvalidTransactionId;
+	MyProc->xidCopy = InvalidTransactionId;
 	MyProc->xmin = InvalidTransactionId;
 	MyProc->backendId = InvalidBackendId;
 	MyProc->databaseId = InvalidOid;

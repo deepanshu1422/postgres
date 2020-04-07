@@ -100,10 +100,18 @@ struct PGPROC
 								 * vacuum must not remove tuples deleted by
 								 * xid >= xmin ! */
 
+	/*
+	 * The following are copies of values in ProcGlobal arrays that can be
+	 * accessed without holding ProcArrayLock.
+	 */
+	TransactionId xidCopy;
+
 	LocalTransactionId lxid;	/* local id of top-level transaction currently
 								 * being executed by this proc, if running;
 								 * else InvalidLocalTransactionId */
 	int			pid;			/* Backend's process ID; 0 if prepared xact */
+
+	int			pgxactoff;		/* offset into various ProcGlobal-> arrays */
 	int			pgprocno;
 
 	/* These fields are zero while a backend is still starting up: */
@@ -220,10 +228,6 @@ extern PGDLLIMPORT struct PGXACT *MyPgXact;
  */
 typedef struct PGXACT
 {
-	TransactionId xid;			/* id of top-level transaction currently being
-								 * executed by this proc, if running and XID
-								 * is assigned; else InvalidTransactionId */
-
 	uint8		vacuumFlags;	/* vacuum-related flags, see above */
 	bool		overflowed;
 
@@ -239,6 +243,29 @@ typedef struct PROC_HDR
 	PGPROC	   *allProcs;
 	/* Array of PGXACT structures (not including dummies for prepared txns) */
 	PGXACT	   *allPgXact;
+
+	/*
+	 * Arrays with per-backend information that is hotly accessed, indexed by
+	 * PGPROC->pgxactoff. These are in separate arrays for two reasons: First,
+	 * to prevent updates of frequently changing data invaliding shared
+	 * cachelines in less frequently changing ones, and second to condense
+	 * frequently accessed data into as few cachelines as possible.
+	 *
+	 * As these arrays are densely packed, and adding/removing PGPROC entries
+	 * will change each backend's PGPROC->pgxactoff, they can only be accessed
+	 * when holding ProcArrayLock.  For a backend's own needs, or for lookups
+	 * that don't need to be that efficient, copies of the values are stored
+	 * in PGPROC.
+	 */
+
+	/*
+	 * TransactionId of top-level transaction currently being executed by each
+	 * proc, if running and XID is assigned; else InvalidTransactionId.
+	 *
+	 * Each PGPROC has a copy of its value in PGPROC.xidCopy.
+	 */
+	TransactionId *xids;
+
 	/* Length of allProcs array */
 	uint32		allProcCount;
 	/* Head of list of free PGPROC structures */
