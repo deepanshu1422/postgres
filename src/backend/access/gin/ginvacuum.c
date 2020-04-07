@@ -793,3 +793,22 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 	return stats;
 }
+
+bool
+GinPageIsRecyclable(Page page)
+{
+	TransactionId delete_xid;
+
+	if (PageIsNew(page))
+		return true;
+
+	if (!GinPageIsDeleted(page))
+		return false;
+
+	delete_xid = GinPageGetDeleteXid(page);
+
+	if (!TransactionIdIsValid(delete_xid))
+		return true;
+
+	return InvisibleToEveryoneCheckXid(NULL, delete_xid);
+}

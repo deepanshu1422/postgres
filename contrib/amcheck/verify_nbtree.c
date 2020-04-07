@@ -413,7 +413,7 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 
 	/*
 	 * This assertion matches the one in index_getnext_tid().  See page
-	 * recycling/RecentGlobalXmin notes in nbtree README.
+	 * recycling/"invisible to everyone" notes in nbtree README.
 	 */
 	Assert(SnapshotSet());
 
@@ -1437,7 +1437,7 @@ bt_right_page_check_scankey(BtreeCheckState *state)
 	 * does not occur until no possible index scan could land on the page.
 	 * Index scans can follow links with nothing more than their snapshot as
 	 * an interlock and be sure of at least that much.  (See page
-	 * recycling/RecentGlobalXmin notes in nbtree README.)
+	 * recycling/"invisible to everyone" notes in nbtree README.)
 	 *
 	 * Furthermore, it's okay if we follow a rightlink and find a half-dead or
 	 * dead (ignorable) page one or more times.  There will either be a

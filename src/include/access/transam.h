@@ -54,6 +54,8 @@
 #define FullTransactionIdFollowsOrEquals(a, b) ((a).value >= (b).value)
 #define FullTransactionIdIsValid(x)		TransactionIdIsValid(XidFromFullTransactionId(x))
 #define InvalidFullTransactionId		FullTransactionIdFromEpochAndXid(0, InvalidTransactionId)
+#define FirstNormalFullTransactionId	FullTransactionIdFromEpochAndXid(0, FirstNormalTransactionId)
+#define FullTransactionIdIsNormal(x)	FullTransactionIdFollowsOrEquals(x, FirstNormalFullTransactionId)
 
 /*
  * A 64 bit value that contains an epoch and a TransactionId.  This is
@@ -100,6 +102,19 @@ FullTransactionIdAdvance(FullTransactionId *dest)
 	dest->value++;
 	while (XidFromFullTransactionId(*dest) < FirstNormalTransactionId)
 		dest->value++;
+}
+
+/* retreat a FullTransactionId variable, stepping over special XIDs */
+static inline void
+FullTransactionIdRetreat(FullTransactionId *dest)
+{
+	dest->value--;
+
+	if (FullTransactionIdPrecedes(*dest, FirstNormalFullTransactionId))
+		return;
+
+	while (XidFromFullTransactionId(*dest) < FirstNormalTransactionId)
+		dest->value--;
 }
 
 /* back up a transaction ID variable, handling wraparound correctly */
@@ -193,8 +208,8 @@ typedef struct VariableCacheData
 	/*
 	 * These fields are protected by ProcArrayLock.
 	 */
-	TransactionId latestCompletedXid;	/* newest XID that has committed or
-										 * aborted */
+	FullTransactionId latestCompletedFullXid;	/* newest full XID that has
+												 * committed or aborted */
 
 	/*
 	 * These fields are protected by CLogTruncationLock
@@ -244,6 +259,12 @@ extern void AdvanceOldestClogXid(TransactionId oldest_datfrozenxid);
 extern bool ForceTransactionIdLimitUpdate(void);
 extern Oid	GetNewObjectId(void);
 
+#ifdef USE_ASSERT_CHECKING
+extern void AssertTransactionIdMayBeOnDisk(TransactionId xid);
+#else
+#define AssertTransactionIdMayBeOnDisk(xid) ((void)true)
+#endif
+
 /*
  * Some frontend programs include this header.  For compilers that emit static
  * inline functions even when they're unused, that leads to unsatisfied
@@ -258,6 +279,59 @@ static inline TransactionId
 ReadNewTransactionId(void)
 {
 	return XidFromFullTransactionId(ReadNextFullTransactionId());
+}
+
+/* return transaction ID backed up by amount, handling wraparound correctly */
+static inline TransactionId
+TransactionIdRetreatedBy(TransactionId xid, uint32 amount)
+{
+	xid -= amount;
+
+	while (xid < FirstNormalTransactionId)
+		xid--;
+
+	return xid;
+}
+
+/* return the older of the two IDs */
+static inline TransactionId
+TransactionIdOlder(TransactionId a, TransactionId b)
+{
+	if (!TransactionIdIsValid(a))
+		return b;
+
+	if (!TransactionIdIsValid(b))
+		return a;
+
+	if (TransactionIdPrecedes(a, b))
+		return a;
+	return b;
+}
+
+/* return the older of the two IDs, assuming they're both normal */
+static inline TransactionId
+NormalTransactionIdOlder(TransactionId a, TransactionId b)
+{
+	Assert(TransactionIdIsNormal(a));
+	Assert(TransactionIdIsNormal(b));
+	if (NormalTransactionIdPrecedes(a, b))
+		return a;
+	return b;
+}
+
+/* return the newer of the two IDs */
+static inline FullTransactionId
+FullTransactionIdNewer(FullTransactionId a, FullTransactionId b)
+{
+	if (!FullTransactionIdIsValid(a))
+		return b;
+
+	if (!FullTransactionIdIsValid(b))
+		return a;
+
+	if (FullTransactionIdFollows(a, b))
+		return a;
+	return b;
 }
 
 #endif							/* FRONTEND */

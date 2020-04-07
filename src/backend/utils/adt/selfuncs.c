@@ -5610,7 +5610,8 @@ get_actual_variable_endpoint(Relation heapRel,
 	 * or could even be NULL.  We avoid this hazard because we take the data
 	 * from the index entry not the heap.
 	 */
-	InitNonVacuumableSnapshot(SnapshotNonVacuumable, RecentGlobalXmin);
+	InitNonVacuumableSnapshot(SnapshotNonVacuumable,
+							  InvisibleToEveryoneTestInit(heapRel));
 
 	index_scan = index_beginscan(heapRel, indexRel,
 								 &SnapshotNonVacuumable,
