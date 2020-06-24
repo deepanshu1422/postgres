@@ -37,6 +37,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -121,6 +122,8 @@ InitPostmasterChild(void)
 	MyLatch = &LocalLatchData;
 	InitLatch(MyLatch);
 	InitializeLatchWaitSet();
+
+	pgaio_postmaster_child_init_local();
 
 	/*
 	 * If possible, make this process a group leader, so that the postmaster
