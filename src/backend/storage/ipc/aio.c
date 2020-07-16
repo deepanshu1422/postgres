@@ -340,6 +340,9 @@ typedef struct PgAioCtl
 	 */
 	uint32 used_count;
 
+	/*
+	 * Protected by SharedAIOCtlLock.
+	 */
 	dlist_head reaped_uncompleted;
 
 	/*
@@ -823,13 +826,13 @@ pgaio_complete_ios(bool in_error)
 			{
 				Assert((*(volatile PgAioIPFlags*) &io->flags) & (PGAIOIP_SOFT_FAILURE | PGAIOIP_HARD_FAILURE));
 
-				LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+				LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 				*(volatile PgAioIPFlags*) &io->flags =
 					(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 					PGAIOIP_DONE |
 					PGAIOIP_SHARED_FAILED;
 				dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->io_node);
-				LWLockRelease(SharedAIOCompletionLock);
+				LWLockRelease(SharedAIOCtlLock);
 			}
 
 			/* signal state change */
@@ -842,14 +845,14 @@ pgaio_complete_ios(bool in_error)
 
 			dlist_delete_from(&my_aio->reaped, node);
 
-			LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 			*(volatile PgAioIPFlags*) &io->flags =
 				(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 				PGAIOIP_DONE |
 				PGAIOIP_HARD_FAILURE |
 				PGAIOIP_SHARED_FAILED;
 			dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->io_node);
-			LWLockRelease(SharedAIOCompletionLock);
+			LWLockRelease(SharedAIOCtlLock);
 		}
 	}
 
