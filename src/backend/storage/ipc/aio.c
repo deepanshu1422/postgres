@@ -371,6 +371,7 @@ static void pgaio_backpressure(struct io_uring *ring, const char *loc);
 static void pgaio_prepare_io(PgAioInProgress *io, PgAioAction action);
 static void pgaio_finish_io(PgAioInProgress *io);
 static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
+static void pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, bool in_error);
 
 /* io_uring related functions */
 static int pgaio_uring_submit(bool drain);
@@ -633,14 +634,14 @@ pgaio_at_abort(void)
 {
 	pgaio_complete_ios(/* in_error = */ true);
 
-	pgaio_submit_pending(true);
+	pgaio_submit_pending(false);
 
 	while (!dlist_is_empty(&my_aio->outstanding))
 	{
 		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->outstanding);
 
 		if (!pgaio_io_done(io))
-			pgaio_io_wait(io, true);
+			pgaio_io_wait_internal(io, true, /* in_error = */ true);
 		pgaio_io_release(io);
 	}
 }
@@ -962,7 +963,7 @@ pgaio_complete_ios(bool in_error)
  * Receive completions in ring.
  */
 static int  __attribute__((noinline))
-pgaio_drain(struct io_uring *ring)
+pgaio_drain(struct io_uring *ring, bool in_error)
 {
 	int ndrained = 0;
 
@@ -1022,7 +1023,8 @@ pgaio_drain(struct io_uring *ring)
 				if (!io->on_completion_local)
 					continue;
 
-				io->on_completion_local->callback(io->on_completion_local, io);
+				if (!in_error)
+					io->on_completion_local->callback(io->on_completion_local, io);
 			}
 
 			recursion_count--;
@@ -1210,7 +1212,7 @@ pgaio_submit_pending(bool drain)
 static void  __attribute__((noinline))
 pgaio_backpressure(struct io_uring *ring, const char *loc)
 {
-	pgaio_drain(ring);
+	pgaio_drain(ring, false);
 
 	while (true)
 	{
@@ -1225,7 +1227,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 			int cqr_before = io_uring_cq_ready(ring);
 			int used_before = aio_ctl->used_count;
 
-			total = pgaio_drain(ring);
+			total = pgaio_drain(ring, false);
 
 			elog(DEBUG1, "backpressure drain at %s:"
 				 " cqr before/after: %d/%d"
@@ -1291,34 +1293,13 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 				 io_uring_sq_ready(ring));
 #endif
 			if (cqr_after)
-				pgaio_drain(ring);
+				pgaio_drain(ring, false);
 		}
 	}
 }
 
-/*
- * FIXME: The !holding_reference implementation is a really ugly crock. It's
- * needed for things like WaitIO(), where we can't ensure that the io hasn't
- * already been freed and recycled by the time we check. And locking
- * preventing that would be prohibitively expensive.
- *
- * It'd be much better to implement it as something like:
- *
- * aio = buf->io_in_progress;
- * if (buf->io_in_progress)
- * {
- *     pgaio_io_wait_prepare(io);
- *     if (!buf->io_in_progress)
- *         continue;
- *     pgaio_io_wait(io);
- * ...
-
- * where pgaio_io_wait_prepare would start to wait on the IO's condition
- * variable, and the subsequent check of buf->io_in_progress would ensure that
- * wait on the wrong buffer.
- */
-void
-pgaio_io_wait(PgAioInProgress *io, bool holding_reference)
+static void
+pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, bool in_error)
 {
 	PgAioIPFlags init_flags;
 	PgAioIPFlags flags;
@@ -1401,7 +1382,7 @@ again:
 			(flags & done_flags))
 			break;
 
-		pgaio_drain(&aio_ctl->shared_ring);
+		pgaio_drain(&aio_ctl->shared_ring, in_error);
 
 		current_generation = *(volatile uint64*) &io->generation;
 		flags = *(volatile PgAioIPFlags*) &io->flags;
@@ -1454,7 +1435,8 @@ again:
 		   flags & done_flags);
 
 out:
-	if (init_generation == current_generation &&
+	if (!in_error &&
+		init_generation == current_generation &&
 		(flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_HARD_FAILURE)))
 	{
 		/* can retry soft failures, but not hard ones */
@@ -1480,8 +1462,36 @@ out:
 		!(flags & PGAIOIP_LOCAL_CALLBACK_CALLED) &&
 		io->on_completion_local)
 	{
-		pgaio_drain(&aio_ctl->shared_ring);
+		pgaio_drain(&aio_ctl->shared_ring, in_error);
 	}
+}
+
+
+/*
+ * FIXME: The !holding_reference implementation is a really ugly crock. It's
+ * needed for things like WaitIO(), where we can't ensure that the io hasn't
+ * already been freed and recycled by the time we check. And locking
+ * preventing that would be prohibitively expensive.
+ *
+ * It'd be much better to implement it as something like:
+ *
+ * aio = buf->io_in_progress;
+ * if (buf->io_in_progress)
+ * {
+ *     pgaio_io_wait_prepare(io);
+ *     if (!buf->io_in_progress)
+ *         continue;
+ *     pgaio_io_wait(io);
+ * ...
+
+ * where pgaio_io_wait_prepare would start to wait on the IO's condition
+ * variable, and the subsequent check of buf->io_in_progress would ensure that
+ * wait on the wrong buffer.
+ */
+void
+pgaio_io_wait(PgAioInProgress *io, bool holding_reference)
+{
+	pgaio_io_wait_internal(io, holding_reference, /* in_error = */ false);
 }
 
 PgAioInProgress *
@@ -1510,7 +1520,7 @@ pgaio_io_get(void)
 		 *
 		 * Also, need to protect against too many ios handed out but not used.
 		 */
-		pgaio_drain(&aio_ctl->shared_ring);
+		pgaio_drain(&aio_ctl->shared_ring, false);
 
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
@@ -2064,7 +2074,7 @@ pgaio_bounce_buffer_get(void)
 		LWLockRelease(SharedAIOCtlLock);
 
 		if (!bb)
-			pgaio_drain(&aio_ctl->shared_ring);
+			pgaio_drain(&aio_ctl->shared_ring, false);
 		else
 			break;
 	}
@@ -2188,7 +2198,7 @@ pgaio_uring_submit(bool drain)
 
 		/* check if there are completions we could process */
 		if (drain)
-			pgaio_drain(&aio_ctl->shared_ring);
+			pgaio_drain(&aio_ctl->shared_ring, false);
 	}
 
 	return total_submitted;
