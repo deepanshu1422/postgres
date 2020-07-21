@@ -1766,8 +1766,9 @@ pg_stat_aio_backends| SELECT s.pid,
     s.outstanding_count,
     s.pending_count,
     s.local_completed_count,
-    s.foreign_completed_count
-   FROM pg_stat_get_aio_backends() s(pid, executed_total_count, issued_total_count, submissions_total_count, foreign_completed_total_count, retry_total_count, inflight_count, unused_count, outstanding_count, pending_count, local_completed_count, foreign_completed_count);
+    s.foreign_completed_count,
+    s.last_context
+   FROM pg_stat_get_aio_backends() s(pid, executed_total_count, issued_total_count, submissions_total_count, foreign_completed_total_count, retry_total_count, inflight_count, unused_count, outstanding_count, pending_count, local_completed_count, foreign_completed_count, last_context);
 pg_stat_aios| SELECT s.id,
     s.operation,
     s.flags,

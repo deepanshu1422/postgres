@@ -56,6 +56,8 @@
 #define PGAIO_MAX_LOCAL_REAPED 128
 #define PGAIO_MAX_COMBINE 16
 
+#define PGAIO_NUM_CONTEXTS 8
+
 
 typedef enum PgAioAction
 {
@@ -247,6 +249,8 @@ struct PgAioBounceBuffer
 
 typedef struct PgAioPerBackend
 {
+	uint32 last_context;
+
 	/*
 	 * Local unused IOs. There's only a limited number of these. Used to
 	 * reduce overhead of the central unused list.
@@ -327,6 +331,14 @@ typedef struct PgAioPerBackend
 
 } PgAioPerBackend;
 
+typedef struct PgAioContext
+{
+	LWLock submission_lock;
+	LWLock completion_lock;
+	struct io_uring io_uring_ring;
+	/* XXX: probably worth padding to a cacheline boundary here */
+} PgAioContext;
+
 typedef struct PgAioCtl
 {
 	/* PgAioInProgress that are not used */
@@ -345,29 +357,20 @@ typedef struct PgAioCtl
 	 */
 	dlist_head reaped_uncompleted;
 
-	/*
-	 * FIXME: there should be multiple rings, at least one for data integrity
-	 * writes, allowing efficient interleaving with WAL writes, and one for
-	 * the rest. But likely a small number of non integrity rings too.
-	 *
-	 * It could also make sense to have a / a few rings for specific purposes
-	 * like prefetching, and vacuum too. Configuring different depths could be
-	 * a nice tool to manage maximum overall system impact (in particular by
-	 * limiting queue/inflight operations size).
-	 */
-	struct io_uring shared_ring;
-
 	dlist_head bounce_buffers;
 
 	int backend_state_count;
 	PgAioPerBackend *backend_state;
+
+	uint32 num_contexts;
+	PgAioContext *contexts;
 
 	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
 } PgAioCtl;
 
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
-static void pgaio_backpressure(struct io_uring *ring, const char *loc);
+static void pgaio_backpressure(PgAioContext *context, const char *loc);
 static void pgaio_prepare_io(PgAioInProgress *io, PgAioAction action);
 static void pgaio_finish_io(PgAioInProgress *io);
 static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
@@ -375,8 +378,8 @@ static void pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, 
 
 /* io_uring related functions */
 static int pgaio_uring_submit(bool drain);
-static int pgaio_uring_drain(struct io_uring *ring);
-static void pgaio_uring_wait_one(struct io_uring *ring, PgAioInProgress *io, uint32 wait_event_info);
+static int pgaio_uring_drain(PgAioContext *context);
+static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_event_info);
 
 static int pgaio_uring_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec **iovs);
 static void pgaio_uring_io_from_cqe(struct io_uring_cqe *cqe);
@@ -467,11 +470,17 @@ AioBounceShmemSize(void)
 					mul_size(BLCKSZ, max_aio_bounce_buffers));
 }
 
+static Size
+AioContextShmemSize(void)
+{
+	return mul_size(PGAIO_NUM_CONTEXTS, sizeof(PgAioContext));
+}
+
 Size
 AioShmemSize(void)
 {
 	return add_size(add_size(AioCtlShmemSize(), AioBounceShmemSize()),
-					AioCtlBackendShmemSize());
+					add_size(AioCtlBackendShmemSize(), AioContextShmemSize()));
 }
 
 void
@@ -538,11 +547,28 @@ AioShmemInit(void)
 		}
 
 		{
-			int ret;
+			aio_ctl->num_contexts = PGAIO_NUM_CONTEXTS;
+			aio_ctl->contexts = ShmemInitStruct("PgAioContexts", AioContextShmemSize(), &found);
 
-			ret = io_uring_queue_init(max_aio_in_flight, &aio_ctl->shared_ring, 0);
-			if (ret < 0)
-				elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
+			for (int contextno = 0; contextno < aio_ctl->num_contexts; contextno++)
+			{
+				PgAioContext *context = &aio_ctl->contexts[contextno];
+				int ret;
+
+				LWLockInitialize(&context->submission_lock, LWTRANCHE_AIO_CONTEXT_SUBMISSION);
+				LWLockInitialize(&context->completion_lock, LWTRANCHE_AIO_CONTEXT_COMPLETION);
+
+				/*
+				 * XXX: Probably worth sharing the WQ between the different
+				 * rings, when supported by the kernel. Could also cause
+				 * additional contention, I guess?
+				 */
+				if (!AcquireExternalFD())
+					elog(ERROR, "io_uring_queue_init: %m");
+				ret = io_uring_queue_init(max_aio_in_flight, &context->io_uring_ring, 0);
+				if (ret < 0)
+					elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
+			}
 		}
 
 	}
@@ -607,7 +633,8 @@ void
 pgaio_postmaster_child_init(void)
 {
 	/* no locking needed here, only affects this process */
-	io_uring_ring_dontfork(&aio_ctl->shared_ring);
+	for (int i = 0; i < aio_ctl->num_contexts; i++)
+		io_uring_ring_dontfork(&aio_ctl->contexts[i].io_uring_ring);
 
 	my_aio_id = MyProc->pgprocno;
 	my_aio = &aio_ctl->backend_state[my_aio_id];
@@ -776,7 +803,7 @@ pgaio_uncombine(void)
 	dlist_foreach_modify(iter, &my_aio->reaped)
 	{
 		PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, iter.cur);
-		uint32 extracted = 0;
+		uint32 extracted = 1;
 
 		if (io->flags & PGAIOIP_MERGE)
 			extracted += pgaio_uncombine_one(io);
@@ -786,7 +813,7 @@ pgaio_uncombine(void)
 		 * the received IOs.
 		 */
 		pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight,
-								extracted + 1);
+								extracted);
 	}
 }
 
@@ -963,13 +990,13 @@ pgaio_complete_ios(bool in_error)
  * Receive completions in ring.
  */
 static int  __attribute__((noinline))
-pgaio_drain(struct io_uring *ring, bool in_error)
+pgaio_drain(PgAioContext *context, bool in_error)
 {
 	int ndrained = 0;
 
 	START_CRIT_SECTION();
 
-	ndrained = pgaio_uring_drain(ring);
+	ndrained = pgaio_uring_drain(context);
 
 	if (ndrained > 0)
 		pgaio_uncombine();
@@ -1210,9 +1237,9 @@ pgaio_submit_pending(bool drain)
 }
 
 static void  __attribute__((noinline))
-pgaio_backpressure(struct io_uring *ring, const char *loc)
+pgaio_backpressure(PgAioContext *context, const char *loc)
 {
-	pgaio_drain(ring, false);
+	pgaio_drain(context, false);
 
 	while (true)
 	{
@@ -1224,17 +1251,17 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 		/* first drain */
 		{
 			int total;
-			int cqr_before = io_uring_cq_ready(ring);
+			int cqr_before = io_uring_cq_ready(&context->io_uring_ring);
 			int used_before = aio_ctl->used_count;
 
-			total = pgaio_drain(ring, false);
+			total = pgaio_drain(context, false);
 
 			elog(DEBUG1, "backpressure drain at %s:"
 				 " cqr before/after: %d/%d"
 				 ", my inflight b/a: %d/%d"
 				 ", used b/a: %d/%d, processed %d",
 				 loc,
-				 cqr_before, io_uring_cq_ready(ring),
+				 cqr_before, io_uring_cq_ready(&context->io_uring_ring),
 				 inflight_before, pg_atomic_read_u32(&my_aio->inflight),
 				 used_before, aio_ctl->used_count,
 				 total);
@@ -1249,7 +1276,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 			int ret;
 			int waitfor;
 			int cqr_after;
-			int cqr_before = io_uring_cq_ready(ring);
+			int cqr_before = io_uring_cq_ready(&context->io_uring_ring);
 			int used_before = aio_ctl->used_count;
 
 			/*
@@ -1266,20 +1293,20 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 			 * wait until either that request is processed by somebody else,
 			 * or a new completion is ready. The latter is much more likely.
 			 */
-			cqr_before = io_uring_cq_ready(ring);
+			cqr_before = io_uring_cq_ready(&context->io_uring_ring);
 
 			//waitfor = inflight_before - PGAIO_BACKPRESSURE_LIMIT;
 			waitfor = 1;
 
 			pgstat_report_wait_start(WAIT_EVENT_AIO_BACKPRESSURE);
-			ret = __sys_io_uring_enter(ring->ring_fd,
+			ret = __sys_io_uring_enter(context->io_uring_ring.ring_fd,
 									   0, waitfor,
 									   IORING_ENTER_GETEVENTS, NULL);
 			pgstat_report_wait_end();
 			if (ret < 0 && errno != EINTR)
 				elog(WARNING, "enter failed: %d/%s", ret, strerror(-ret));
 
-			cqr_after = io_uring_cq_ready(ring);
+			cqr_after = io_uring_cq_ready(&context->io_uring_ring);
 #if 1
 			elog(DEBUG2, "backpressure wait at %s waited for %d, "
 				 "for inflight b/a: %d/%d, used b/a: %d/%d, "
@@ -1288,12 +1315,12 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 				 loc, waitfor,
 				 inflight_before, pg_atomic_read_u32(&my_aio->inflight),
 				 used_before, aio_ctl->used_count,
-				 cqr_before, io_uring_cq_ready(ring),
-				 io_uring_sq_space_left(ring),
-				 io_uring_sq_ready(ring));
+				 cqr_before, io_uring_cq_ready(&context->io_uring_ring),
+				 io_uring_sq_space_left(&context->io_uring_ring),
+				 io_uring_sq_ready(&context->io_uring_ring));
 #endif
 			if (cqr_after)
-				pgaio_drain(ring, false);
+				pgaio_drain(context, false);
 		}
 	}
 }
@@ -1306,6 +1333,7 @@ pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, bool in_erro
 	uint32 done_flags = PGAIOIP_DONE | PGAIOIP_IDLE;
 	uint64 init_generation = *(volatile uint64*) &io->generation;
 	uint64 current_generation;
+	PgAioContext *context;
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG3, "waiting for %zu",
@@ -1325,7 +1353,7 @@ pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, bool in_erro
 	}
 
 again:
-
+	context = &aio_ctl->contexts[io->ring];
 	current_generation = *(volatile uint64*) &io->generation;
 
 	flags = *(volatile PgAioIPFlags*) &io->flags;
@@ -1382,7 +1410,7 @@ again:
 			(flags & done_flags))
 			break;
 
-		pgaio_drain(&aio_ctl->shared_ring, in_error);
+		pgaio_drain(context, in_error);
 
 		current_generation = *(volatile uint64*) &io->generation;
 		flags = *(volatile PgAioIPFlags*) &io->flags;
@@ -1404,8 +1432,7 @@ again:
 		else if (flags & PGAIOIP_INFLIGHT)
 		{
 			/* note that this is allowed to spuriously return */
-			pgaio_uring_wait_one(&aio_ctl->shared_ring, io,
-								 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
+			pgaio_uring_wait_one(context, io, WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 		}
 		else
 		{
@@ -1462,7 +1489,7 @@ out:
 		!(flags & PGAIOIP_LOCAL_CALLBACK_CALLED) &&
 		io->on_completion_local)
 	{
-		pgaio_drain(&aio_ctl->shared_ring, in_error);
+		pgaio_drain(context, in_error);
 	}
 }
 
@@ -1520,7 +1547,8 @@ pgaio_io_get(void)
 		 *
 		 * Also, need to protect against too many ios handed out but not used.
 		 */
-		pgaio_drain(&aio_ctl->shared_ring, false);
+		for (int i = 0; i < aio_ctl->num_contexts; i++)
+			pgaio_drain(&aio_ctl->contexts[i], false);
 
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
@@ -1769,7 +1797,7 @@ pgaio_finish_io(PgAioInProgress *io)
 	if (my_aio->pending_count >= PGAIO_SUBMIT_BATCH_SIZE)
 		pgaio_submit_pending(true);
 	else
-		pgaio_backpressure(&aio_ctl->shared_ring, "get_io");
+		pgaio_backpressure(&aio_ctl->contexts[0], "get_io");
 }
 
 
@@ -1834,23 +1862,45 @@ pgaio_io_release(PgAioInProgress *io)
 void
 pgaio_print_queues(void)
 {
-	uint32 inflight = 0;
+	StringInfoData s;
+	uint32 inflight_backend = 0;
+	uint32 *inflight_context;
+
+	initStringInfo(&s);
 
 	for (int procno = 0; procno < aio_ctl->backend_state_count; procno++)
 	{
 		PgAioPerBackend *bs = &aio_ctl->backend_state[procno];
 
-		inflight += pg_atomic_read_u32(&bs->inflight);
+		inflight_backend += pg_atomic_read_u32(&bs->inflight);
 	}
 
-	ereport(LOG,
-			errmsg("shared queue: space: %d ready: %d, we think: %u inflight",
-				   io_uring_sq_space_left(&aio_ctl->shared_ring),
-				   io_uring_cq_ready(&aio_ctl->shared_ring),
-				   inflight),
+	inflight_context = palloc0(sizeof(uint32) * aio_ctl->backend_state_count);
+	for (int i = 0; i < max_aio_in_progress; i++)
+	{
+		PgAioInProgress *io = &aio_ctl->in_progress_io[i];
+
+		if (!(io->flags & PGAIOIP_INFLIGHT))
+			continue;
+		inflight_context[io->ring]++;
+	}
+
+	appendStringInfo(&s, "inflight backend: %d", inflight_backend);
+
+	for (int contextno = 0; contextno < aio_ctl->num_contexts; contextno++)
+	{
+		PgAioContext *context = &aio_ctl->contexts[contextno];
+
+		appendStringInfo(&s, "\n\tqueue[%d]: space: %d, ready: %d, we think inflight: %d",
+						 contextno,
+						 io_uring_sq_space_left(&context->io_uring_ring),
+						 io_uring_cq_ready(&context->io_uring_ring),
+						 inflight_context[contextno]);
+	}
+
+	ereport(LOG, errmsg_internal("%s", s.data),
 			errhidestmt(true),
-			errhidecontext(true)
-		);
+			errhidecontext(true));
 }
 
 static const char *
@@ -2074,7 +2124,10 @@ pgaio_bounce_buffer_get(void)
 		LWLockRelease(SharedAIOCtlLock);
 
 		if (!bb)
-			pgaio_drain(&aio_ctl->shared_ring, false);
+		{
+			for (int i = 0; i < aio_ctl->num_contexts; i++)
+				pgaio_drain(&aio_ctl->contexts[i], false);
+		}
 		else
 			break;
 	}
@@ -2111,6 +2164,48 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 	io->bb = bb;
 }
 
+/*
+ * FIXME: Should this be in general or io_uring specific code?
+ */
+static PgAioContext *
+pgaio_acquire_context(void)
+{
+	PgAioContext *context;
+	int init_last_context = my_aio->last_context;
+
+	/*
+	 * First try to acquire a context without blocking on the lock. We start
+	 * with the last context we successfully used, which should lead to
+	 * backends spreading to different contexts over time.
+	 */
+	for (int i = 0; i < aio_ctl->num_contexts; i++)
+	{
+		context = &aio_ctl->contexts[my_aio->last_context];
+
+		if (LWLockConditionalAcquire(&context->submission_lock, LW_EXCLUSIVE))
+		{
+			return context;
+		}
+
+		if (++my_aio->last_context == aio_ctl->num_contexts)
+			my_aio->last_context = 0;
+	}
+
+	/*
+	 * Couldn't acquire any without blocking. Block on the last + 1.;
+	 */
+	if (++my_aio->last_context == aio_ctl->num_contexts)
+		my_aio->last_context = 0;
+	context = &aio_ctl->contexts[my_aio->last_context];
+
+	elog(DEBUG2, "blocking acquiring io context %d, started on %d",
+		 my_aio->last_context, init_last_context);
+
+	LWLockAcquire(&context->submission_lock, LW_EXCLUSIVE);
+
+	return context;
+}
+
 /* --------------------------------------------------------------------------------
  * io_uring related code
  * --------------------------------------------------------------------------------
@@ -2130,15 +2225,16 @@ pgaio_uring_submit(bool drain)
 		int inflight_add = 0;
 		struct iovec *iovs = pgaio_uring_submit_iovecs;
 
+		PgAioContext *context = pgaio_acquire_context();
+
 		Assert(nsubmit != 0 && nsubmit <= my_aio->pending_count);
-		LWLockAcquire(SharedAIOSubmissionLock, LW_EXCLUSIVE);
 
 		for (int i = 0; i < nsubmit; i++)
 		{
 			dlist_node *node;
-			PgAioInProgress *io;
+			PgAioInProgress *io, *cur;
 
-			sqe[nios] = io_uring_get_sqe(&aio_ctl->shared_ring);
+			sqe[nios] = io_uring_get_sqe(&context->io_uring_ring);
 
 			if (!sqe[nios])
 				break;
@@ -2150,6 +2246,14 @@ pgaio_uring_submit(bool drain)
 
 			ios[nios] = io;
 			inflight_add += pgaio_uring_sq_from_io(ios[nios], sqe[nios], &iovs);
+
+			cur = io;
+
+			while (cur)
+			{
+				cur->ring = context - aio_ctl->contexts;
+				cur = cur->merge_with;
+			}
 
 			*(volatile PgAioIPFlags*) &io->flags =
 				(io->flags & ~PGAIOIP_PENDING) | PGAIOIP_INFLIGHT;
@@ -2167,7 +2271,7 @@ pgaio_uring_submit(bool drain)
 
 	again:
 			pgstat_report_wait_start(WAIT_EVENT_AIO_SUBMIT);
-			ret = io_uring_submit(&aio_ctl->shared_ring);
+			ret = io_uring_submit(&context->io_uring_ring);
 			pgstat_report_wait_end();
 
 			if (ret == -EINTR)
@@ -2178,7 +2282,7 @@ pgaio_uring_submit(bool drain)
 					 ret, strerror(-ret));
 		}
 
-		LWLockRelease(SharedAIOSubmissionLock);
+		LWLockRelease(&context->submission_lock);
 
 		/*
 		 * Others might have been waiting for this IO. Because it wasn't
@@ -2198,31 +2302,31 @@ pgaio_uring_submit(bool drain)
 
 		/* check if there are completions we could process */
 		if (drain)
-			pgaio_drain(&aio_ctl->shared_ring, false);
+			pgaio_drain(context, false);
 	}
 
 	return total_submitted;
 }
 
 static int
-pgaio_uring_drain(struct io_uring *ring)
+pgaio_uring_drain(PgAioContext *context)
 {
 	uint32 processed = 0;
 	int ready;
 
-	Assert(!LWLockHeldByMe(SharedAIOCompletionLock));
+	Assert(!LWLockHeldByMe(&context->completion_lock));
 
-	if (!io_uring_cq_ready(ring))
+	if (!io_uring_cq_ready(&context->io_uring_ring))
 		return 0;
 
-	LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+	LWLockAcquire(&context->completion_lock, LW_EXCLUSIVE);
 
 	/*
 	 * Don't drain more events than available right now. Otherwise it's
 	 * plausible that one backend could get stuck, for a while, receiving CQEs
 	 * without actually processing them.
 	 */
-	ready = io_uring_cq_ready(ring);
+	ready = io_uring_cq_ready(&context->io_uring_ring);
 
 	while (ready > 0)
 	{
@@ -2230,7 +2334,7 @@ pgaio_uring_drain(struct io_uring *ring)
 		uint32 processed_one;
 
 		processed_one =
-			io_uring_peek_batch_cqe(ring,
+			io_uring_peek_batch_cqe(&context->io_uring_ring,
 									reaped_cqes,
 									Min(PGAIO_MAX_LOCAL_REAPED, ready));
 		Assert(processed_one <= ready);
@@ -2244,17 +2348,17 @@ pgaio_uring_drain(struct io_uring *ring)
 
 			pgaio_uring_io_from_cqe(cqe);
 
-			io_uring_cqe_seen(ring, cqe);
+			io_uring_cqe_seen(&context->io_uring_ring, cqe);
 		}
 	}
 
-	LWLockRelease(SharedAIOCompletionLock);
+	LWLockRelease(&context->completion_lock);
 
 	return processed;
 }
 
 static void
-pgaio_uring_wait_one(struct io_uring *ring, PgAioInProgress *io, uint32 wait_event_info)
+pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_event_info)
 {
 	PgAioIPFlags flags;
 	int ret;
@@ -2277,13 +2381,13 @@ pgaio_uring_wait_one(struct io_uring *ring, PgAioInProgress *io, uint32 wait_eve
 
 #ifdef PGAIO_VERBOSE
 		elog(DEBUG3, "sys enter %zu, ready %d ",
-			 io - aio_ctl->in_progress_io, io_uring_cq_ready(ring));
+			 io - aio_ctl->in_progress_io, io_uring_cq_ready(&context->io_uring_ring));
 #endif
 
 		/* wait for one io to be completed */
 		errno = 0;
 		pgstat_report_wait_start(wait_event_info);
-		ret = __sys_io_uring_enter(ring->ring_fd,
+		ret = __sys_io_uring_enter(context->io_uring_ring.ring_fd,
 								   0, 1,
 								   IORING_ENTER_GETEVENTS, &UnBlockSig);
 		pgstat_report_wait_end();
@@ -2925,7 +3029,7 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 Datum
 pg_stat_get_aio_backends(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_AIO_BACKEND_COLS	12
+#define PG_STAT_GET_AIO_BACKEND_COLS	13
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
@@ -2981,6 +3085,7 @@ pg_stat_get_aio_backends(PG_FUNCTION_ARGS)
 		values[ 9] = Int32GetDatum(bs->pending_count);
 		values[10] = Int32GetDatum(bs->local_completed_count);
 		values[11] = Int32GetDatum(bs->foreign_completed_count);
+		values[12] = Int32GetDatum(bs->last_context);
 
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
