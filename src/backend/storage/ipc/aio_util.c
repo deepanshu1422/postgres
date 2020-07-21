@@ -431,6 +431,8 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 			pgsr->pending_count = 0;
 			pgaio_submit_pending(true);
 		}
+
+		CHECK_FOR_INTERRUPTS();
 	}
 
 	if (pgsr->pending_count >= min_issue)
