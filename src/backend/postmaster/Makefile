@@ -11,7 +11,7 @@
 subdir = src/backend/postmaster
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
-
+CFLAG = -I liburing
 OBJS = \
 	autovacuum.o \
 	bgworker.o \
